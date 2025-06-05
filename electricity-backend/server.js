@@ -218,7 +218,7 @@ app.get("/api/data", async (req, res) => {
     const {
       period = "hour",
       room,
-      date = dayjs().format("YYYY-MM-DD"),
+      date = "2025-06-04",
     } = req.query;
 
     console.log(
@@ -234,280 +234,155 @@ app.get("/api/data", async (req, res) => {
       });
     }
 
-    // Build dynamic query with timestamp-based energy calculation
-    let groupBy, timeFormat, dateFilter;
+    // Build date filter and grouping based on period
+    let dateFilter;
+    let groupBy;
+    let selectFields;
     const params = [];
 
     switch (period) {
+      case "hour":
+        dateFilter = "DATE(p.log_datetime) = ?";
+        groupBy = "HOUR(p.log_datetime)";
+        selectFields = `
+          HOUR(p.log_datetime) as period_value,
+          DATE_FORMAT(p.log_datetime, '%Y-%m-%d %H:00:00') as timestamp,
+          DATE_FORMAT(p.log_datetime, '%H:00') as period_label
+        `;
+        params.push(date);
+        break;
+
       case "day":
-        groupBy = "DATE(log_datetime)";
-        timeFormat = "DATE(log_datetime)";
         const d = dayjs(date);
-        dateFilter = `MONTH(log_datetime) = ? AND YEAR(log_datetime) = ?`;
+        dateFilter = `MONTH(p.log_datetime) = ? AND YEAR(p.log_datetime) = ?`;
+        groupBy = "DAY(p.log_datetime)";
+        selectFields = `
+          DAY(p.log_datetime) as period_value,
+          DATE_FORMAT(p.log_datetime, '%Y-%m-%d 00:00:00') as timestamp,
+          DATE_FORMAT(p.log_datetime, '%m/%d') as period_label
+        `;
         params.push(d.month() + 1, d.year());
         break;
 
+      case "week":
+        const weekStart = dayjs(date).startOf("month");
+        dateFilter = `MONTH(p.log_datetime) = ? AND YEAR(p.log_datetime) = ?`;
+        groupBy = "WEEK(p.log_datetime, 1)";
+        selectFields = `
+          WEEK(p.log_datetime, 1) as period_value,
+          DATE_FORMAT(MIN(p.log_datetime), '%Y-%m-%d 00:00:00') as timestamp,
+          CONCAT('Week ', WEEK(p.log_datetime, 1)) as period_label
+        `;
+        params.push(weekStart.month() + 1, weekStart.year());
+        break;
+
       case "month":
-        groupBy = "MONTH(log_datetime)";
-        timeFormat = "MONTH(log_datetime)";
-        dateFilter = `YEAR(log_datetime) = ?`;
+        dateFilter = `YEAR(p.log_datetime) = ?`;
+        groupBy = "MONTH(p.log_datetime)";
+        selectFields = `
+          MONTH(p.log_datetime) as period_value,
+          DATE_FORMAT(p.log_datetime, '%Y-%m-01 00:00:00') as timestamp,
+          DATE_FORMAT(p.log_datetime, '%b %Y') as period_label
+        `;
         params.push(dayjs(date).year());
         break;
 
-      case "year":
-        groupBy = "YEAR(log_datetime)";
-        timeFormat = "YEAR(log_datetime)";
-        dateFilter = "1 = 1";
-        break;
-
-      default: // hour
-        groupBy = "HOUR(log_datetime)";
-        timeFormat = "HOUR(log_datetime)";
-        dateFilter = "DATE(log_datetime) = ?";
+      default:
+        dateFilter = "DATE(p.log_datetime) = ?";
+        groupBy = "HOUR(p.log_datetime)";
+        selectFields = `
+          HOUR(p.log_datetime) as period_value,
+          DATE_FORMAT(p.log_datetime, '%Y-%m-%d %H:00:00') as timestamp,
+          DATE_FORMAT(p.log_datetime, '%H:00') as period_label
+        `;
         params.push(date);
         break;
     }
 
-    // Enhanced SQL query with timestamp-based energy calculation using window functions
+    // FIXED: Simplified SQL query with proper parameter handling
     const baseSQL = `
-      WITH ordered_data AS (
-        SELECT 
-          p.log_datetime,
-          p.mac_address,
-          p.power,
-          p.energy as meter_energy,
-          ${timeFormat} AS period,
-          LAG(p.log_datetime) OVER (
-            PARTITION BY p.mac_address 
-            ORDER BY p.log_datetime
-          ) AS prev_datetime,
-          LAG(p.power) OVER (
-            PARTITION BY p.mac_address 
-            ORDER BY p.log_datetime
-          ) AS prev_power
-        FROM PZEM p
-        ${room ? "JOIN meters m ON p.mac_address = m.meter_mac" : ""}
-        WHERE ${dateFilter}
-        ${room ? "AND m.room_id = ?" : ""}
-        ORDER BY p.mac_address, p.log_datetime
-      ),
-      energy_calculated AS (
-        SELECT 
-          period,
-          mac_address,
-          log_datetime,
-          power,
-          meter_energy,
-          prev_datetime,
-          prev_power,
-          CASE 
-            WHEN prev_datetime IS NOT NULL AND prev_power IS NOT NULL THEN
-              CASE 
-                WHEN TIMESTAMPDIFF(MINUTE, prev_datetime, log_datetime) <= 60 THEN
-                  -- Calculate energy: average power × time interval (in hours)
-                  ((power + prev_power) / 2) * (TIMESTAMPDIFF(SECOND, prev_datetime, log_datetime) / 3600.0)
-                ELSE 
-                  -- Skip large gaps (likely missing data)
-                  0
-              END
-            ELSE 
-              -- First reading for this device
-              0
-          END AS calculated_energy_wh,
-          CASE 
-            WHEN prev_datetime IS NOT NULL THEN
-              TIMESTAMPDIFF(SECOND, prev_datetime, log_datetime)
-            ELSE 
-              0
-          END AS time_interval_seconds
-        FROM ordered_data
-      )
-      SELECT
-        period,
-        -- Supply energy (from main meter)
-        SUM(CASE 
-          WHEN mac_address = '08:F9:E0:73:64:DB' THEN calculated_energy_wh 
-          ELSE 0 
-        END) AS supply_energy_wh,
-        -- Consumption energy (from all other meters)
-        SUM(CASE 
-          WHEN mac_address != '08:F9:E0:73:64:DB' THEN calculated_energy_wh 
-          ELSE 0 
-        END) AS consumption_energy_wh,
-        -- Average power for reference
-        AVG(CASE 
-          WHEN mac_address = '08:F9:E0:73:64:DB' THEN power 
-          ELSE NULL 
-        END) AS avg_supply_power,
-        AVG(CASE 
-          WHEN mac_address != '08:F9:E0:73:64:DB' THEN power 
-          ELSE NULL 
-        END) AS avg_consumption_power,
-        -- Additional metrics
-        COUNT(*) as total_readings,
-        COUNT(CASE WHEN calculated_energy_wh > 0 THEN 1 END) as valid_energy_calculations,
-        MIN(log_datetime) as first_record,
-        MAX(log_datetime) as last_record,
-        -- Data quality metrics
-        AVG(time_interval_seconds) as avg_interval_seconds,
-        MIN(time_interval_seconds) as min_interval_seconds,
-        MAX(time_interval_seconds) as max_interval_seconds
-      FROM energy_calculated
-      GROUP BY period
-      ORDER BY period ASC
+      SELECT 
+        ${selectFields},
+        ${!room ? `
+        COALESCE(
+          AVG(CASE WHEN p.mac_address = '08:F9:E0:73:64:DB' THEN p.power END), 0
+        ) as supply_power,
+        ` : 'NULL as supply_power,'}
+        COALESCE(
+          AVG(CASE WHEN p.mac_address != '08:F9:E0:73:64:DB' THEN p.power END), 0
+        ) as consumption_power,
+        COUNT(*) as total_records,
+        MIN(p.log_datetime) as first_record,
+        MAX(p.log_datetime) as last_record
+      FROM PZEM p
+      ${room ? "INNER JOIN meters m ON p.mac_address = m.meter_mac" : ""}
+      WHERE ${dateFilter}
+      ${room ? "AND m.room_id = ?" : ""}
+      GROUP BY ${groupBy}
+      HAVING total_records > 0
+      ORDER BY period_value ASC
     `;
 
+    // FIXED: Add room parameter only once, at the end
     if (room) {
       params.push(room);
     }
 
-    console.log("🔍 SQL Query:", baseSQL.replace(/\s+/g, " ").trim());
-    console.log("🔍 Parameters:", params);
+    console.log("🔍 Executing SQL:", baseSQL);
+    console.log("📋 Parameters:", params);
 
-    // Execute with timeout and better error handling
     const connection = await dbPool.getConnection();
-    const [results] = await Promise.race([
-      connection.execute(baseSQL, params),
-      new Promise((_, reject) =>
-        setTimeout(
-          () => reject(new Error("Query timeout after 30 seconds")),
-          30000
-        )
-      ),
-    ]);
+    const [results] = await connection.execute(baseSQL, params);
     connection.release();
 
-    console.log(`✅ Query successful - Found ${results.length} records`);
+    console.log(`📊 Raw SQL Results (${results.length} rows):`, results);
 
-    // Enhanced response handling
     if (results.length === 0) {
-      console.warn("⚠️  No data found for the given criteria");
-
-      // Check if any data exists at all
-      const checkConnection = await dbPool.getConnection();
-      const [totalCheck] = await checkConnection.execute(
-        "SELECT COUNT(*) as count FROM PZEM WHERE " + dateFilter,
-        params.slice(0, -1 * (room ? 1 : 0))
-      );
-      checkConnection.release();
-
       return res.json({
         data: [],
-        message:
-          totalCheck[0].count === 0
-            ? "No data exists for the specified date/period"
-            : "No data found matching the criteria (room filter may be too restrictive)",
-        query: { period, room, date },
-        debug: {
-          totalRecordsForPeriod: totalCheck[0].count,
-          appliedFilters: { period, room, date },
-        },
+        message: `No data found for ${room ? `Room ${room}` : 'All Rooms'} on ${date}`,
+        meta: { period, room, date, count: 0 },
       });
     }
 
-    // Log sample data for debugging
-    console.log("📈 Sample data:", results[0]);
-
-    // Transform results for better frontend consumption
-    const transformedResults = results.map((row) => ({
-      period: row.period,
-      // Convert Wh to kWh for display (divide by 1000)
-      supply_energy_kwh: parseFloat(row.supply_energy_wh / 1000) || 0,
-      consumption_energy_kwh: parseFloat(row.consumption_energy_wh / 1000) || 0,
-      // Keep original Wh values for precision
-      supply_energy_wh: parseFloat(row.supply_energy_wh) || 0,
-      consumption_energy_wh: parseFloat(row.consumption_energy_wh) || 0,
-      // Average power for reference
-      avg_supply_power: parseFloat(row.avg_supply_power) || 0,
-      avg_consumption_power: parseFloat(row.avg_consumption_power) || 0,
-      // Data quality metrics
-      total_readings: row.total_readings,
-      valid_energy_calculations: row.valid_energy_calculations,
-      data_quality_percent:
-        row.total_readings > 0
-          ? Math.round(
-              (row.valid_energy_calculations / row.total_readings) * 100
-            )
-          : 0,
-      // Time information
-      first_record: row.first_record,
-      last_record: row.last_record,
-      avg_interval_minutes: Math.round(row.avg_interval_seconds / 60),
-      min_interval_seconds: row.min_interval_seconds,
-      max_interval_seconds: row.max_interval_seconds,
+    // Transform data for frontend
+    const transformedData = results.map((row) => ({
+      timestamp: row.period_label,
+      fullTimestamp: new Date(row.timestamp),
+      period: row.period_value,
+      supply: room ? null : parseFloat(row.supply_power) || 0,
+      consumption: parseFloat(row.consumption_power) || 0,
+      total_records: row.total_records || 0,
     }));
 
-    // Calculate summary statistics
-    const totalSupplyEnergy = transformedResults.reduce(
-      (sum, item) => sum + item.supply_energy_kwh,
-      0
-    );
-    const totalConsumptionEnergy = transformedResults.reduce(
-      (sum, item) => sum + item.consumption_energy_kwh,
-      0
-    );
-    const avgDataQuality =
-      transformedResults.length > 0
-        ? transformedResults.reduce(
-            (sum, item) => sum + item.data_quality_percent,
-            0
-          ) / transformedResults.length
-        : 0;
+    console.log("🔍 Transformed Data Sample:", transformedData.slice(0, 2));
 
     res.json({
-      data: transformedResults,
-      summary: {
-        total_supply_energy_kwh: Math.round(totalSupplyEnergy * 1000) / 1000,
-        total_consumption_energy_kwh:
-          Math.round(totalConsumptionEnergy * 1000) / 1000,
-        net_energy_kwh:
-          Math.round((totalSupplyEnergy - totalConsumptionEnergy) * 1000) /
-          1000,
-        avg_data_quality_percent: Math.round(avgDataQuality),
-        calculation_method: "timestamp_based_trapezoidal",
-      },
+      data: transformedData,
       meta: {
-        query: { period, room, date },
-        totalRecords: transformedResults.length,
-        timestamp: new Date().toISOString(),
-        notes: [
-          "Energy calculated using actual timestamps between readings",
-          "Gaps > 60 minutes are excluded to avoid inaccurate calculations",
-          "Trapezoidal rule used: (P1 + P2) / 2 × time_interval",
-          "Values in kWh for display, Wh precision maintained",
-        ],
+        period,
+        room: room || "All Rooms",
+        date,
+        count: transformedData.length,
+        total_records: transformedData.reduce(
+          (sum, item) => sum + item.total_records,
+          0
+        ),
+        data_type: `grouped_by_${period}`,
+        supply_mac: "08:F9:E0:73:64:DB",
+        display_mode: room ? "room_only" : "room_vs_supply",
+        chart_title: room
+          ? `Room ${room} Consumption`
+          : "All Rooms vs Supply Grid",
       },
     });
   } catch (error) {
     console.error("❌ Database query error:", error.message);
-    console.error("❌ Stack trace:", error.stack);
-
-    // More specific error responses
-    let errorResponse = {
+    res.status(500).json({
       error: "Database query failed",
       details: error.message,
-      timestamp: new Date().toISOString(),
-      query: req.query,
-    };
-
-    if (error.code === "ER_NO_SUCH_TABLE") {
-      errorResponse.error = "Database table not found";
-      errorResponse.details = "PZEM or meters table doesn't exist";
-      errorResponse.suggestion =
-        "Check if database tables are properly created";
-    } else if (error.code === "ECONNREFUSED") {
-      errorResponse.error = "Database connection refused";
-      errorResponse.details = "Cannot connect to database server";
-      errorResponse.suggestion =
-        "Check if database server is running and accessible";
-    } else if (error.message.includes("timeout")) {
-      errorResponse.error = "Query timeout";
-      errorResponse.details = "Database query took too long to execute";
-      errorResponse.suggestion =
-        "Try a smaller date range or check database performance";
-    }
-
-    res.status(500).json(errorResponse);
+      code: error.code,
+    });
   }
 });
 
@@ -683,6 +558,80 @@ app.get("/api/summary", async (req, res) => {
       error: "Failed to fetch summary",
       details: error.message,
     });
+  }
+});
+
+// Add this debugging endpoint after your existing endpoints
+
+app.get("/api/debug-data", async (req, res) => {
+  try {
+    const { date = dayjs().format("YYYY-MM-DD") } = req.query;
+
+    const connection = await dbPool.getConnection();
+
+    // Check what MAC addresses exist
+    const [macAddresses] = await connection.execute(`
+      SELECT DISTINCT mac_address, COUNT(*) as count,
+             MIN(log_datetime) as first_record,
+             MAX(log_datetime) as last_record
+      FROM PZEM 
+      GROUP BY mac_address 
+      ORDER BY count DESC
+    `);
+
+    // Check data for the specific date
+    const [dateData] = await connection.execute(
+      `
+      SELECT mac_address, 
+             COUNT(*) as count, 
+             AVG(power) as avg_power,
+             SUM(power) as total_power,
+             MIN(log_datetime) as first_record,
+             MAX(log_datetime) as last_record
+      FROM PZEM 
+      WHERE DATE(log_datetime) = ?
+      GROUP BY mac_address
+    `,
+      [date]
+    );
+
+    // Check sample hourly data
+    const [hourlyData] = await connection.execute(
+      `
+      SELECT 
+        HOUR(log_datetime) as hour,
+        mac_address,
+        COUNT(*) as records,
+        AVG(power) as avg_power
+      FROM PZEM 
+      WHERE DATE(log_datetime) = ?
+      GROUP BY HOUR(log_datetime), mac_address
+      ORDER BY hour, mac_address
+      LIMIT 10
+    `,
+      [date]
+    );
+
+    connection.release();
+
+    res.json({
+      query_date: date,
+      all_mac_addresses: macAddresses,
+      date_specific_data: dateData,
+      sample_hourly_data: hourlyData,
+      supply_mac_address: "08:F9:E0:73:64:DB",
+      debug_info: {
+        has_supply_data: dateData.some(
+          (d) => d.mac_address === "08:F9:E0:73:64:DB"
+        ),
+        has_consumption_data: dateData.some(
+          (d) => d.mac_address !== "08:F9:E0:73:64:DB"
+        ),
+        total_records_for_date: dateData.reduce((sum, d) => sum + d.count, 0),
+      },
+    });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
   }
 });
 

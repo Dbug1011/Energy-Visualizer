@@ -218,7 +218,7 @@ const App = () => {
         timestamp: formatTimestamp(item.period, period),
         period: item.period,
         consumption: parseFloat(item.consumption) || 0,
-        supply: parseFloat(item.supply) || 0,
+        supply: room ? null : parseFloat(item.supply) || 0, // Only include supply when no room filter
         record_count: item.record_count || 0,
       }));
 
@@ -261,8 +261,6 @@ const App = () => {
       >
         Electricity Utilization Dashboard
       </h2>
-
-      
 
       <div
         style={{
@@ -422,12 +420,26 @@ const App = () => {
               <div
                 style={{
                   marginBottom: "15px",
-                  fontSize: "14px",
-                  color: "#6c757d",
+                  fontSize: "16px",
+                  fontWeight: "600",
+                  color: "#333",
+                  textAlign: "center",
                 }}
               >
-                Showing {data.length} data points
-                {error && " (using mock data due to server error)"}
+                {room
+                  ? `Room ${room} Energy Consumption`
+                  : "All Rooms Consumption vs Supply Grid"}
+              </div>
+              <div
+                style={{
+                  marginBottom: "15px",
+                  fontSize: "14px",
+                  color: "#6c757d",
+                  textAlign: "center",
+                }}
+              >
+                Showing {data.length} data points for {period}ly view
+                {room && ` (Room ${room} only)`}
               </div>
               <EnergyChart data={data} />
             </>
