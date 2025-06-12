@@ -1,6 +1,6 @@
 require("dotenv").config();
 const express = require("express");
-const mysql = require("mysql2/promise");
+const { Client } = require("@elastic/elasticsearch");
 const cors = require("cors");
 const dayjs = require("dayjs");
 
@@ -30,27 +30,22 @@ app.use(
 
 app.use(express.json());
 
-// Database connection pool
-const dbPool = mysql.createPool({
-  host: process.env.DB_HOST,
-  user: process.env.DB_USER,
-  password: process.env.DB_PASSWORD,
-  database: process.env.DB_NAME,
-  port: process.env.DB_PORT || 3306,
-  waitForConnections: true,
-  connectionLimit: 10,
-  queueLimit: 0,
+// Elasticsearch client
+const esClient = new Client({
+  node: process.env.ES_NODE || "http://localhost:9200",
+  auth: {
+    username: process.env.ES_USERNAME,
+    password: process.env.ES_PASSWORD,
+  },
 });
 
-// Test database connection on startup
+// Test Elasticsearch connection on startup
 (async () => {
   try {
-    const connection = await dbPool.getConnection();
-    await connection.execute("SELECT 1");
-    console.log("✅ Database connected successfully");
-    connection.release();
+    const health = await esClient.cluster.health();
+    console.log("✅ Elasticsearch connected successfully", health.status);
   } catch (err) {
-    console.error("❌ Database connection failed:", err.message);
+    console.error("❌ Elasticsearch connection failed:", err.message);
   }
 })();
 
@@ -59,17 +54,135 @@ app.get("/api/health", (req, res) => {
   res.status(200).json({ status: "ok", message: "Server is healthy" });
 });
 
+// Helper function to normalize MAC address
+const normalizeMacAddress = (mac) => {
+  return mac.replace(/:/g, "").toUpperCase();
+};
+
+// Helper function to get meters data and create MAC to room mapping
+const getMetersMapping = async () => {
+  try {
+    const response = await esClient.search({
+      index: "meters_idx",
+      body: {
+        query: {
+          match_all: {},
+        },
+        size: 10000, // Adjust based on your data size
+      },
+    });
+
+    const macToRoomMap = {};
+    response.body.hits.hits.forEach((hit) => {
+      const source = hit._source;
+      if (source.meter_mac && source.room_id) {
+        const normalizedMac = normalizeMacAddress(source.meter_mac);
+        macToRoomMap[normalizedMac] = source.room_id;
+      }
+    });
+
+    return macToRoomMap;
+  } catch (error) {
+    console.error("❌ Error fetching meters mapping:", error.message);
+    return {};
+  }
+};
+
 // Rooms endpoint
 app.get("/api/rooms", async (req, res) => {
   try {
-    const [rows] = await dbPool.execute("SELECT DISTINCT room_id FROM meters WHERE room_id IS NOT NULL ORDER BY room_id");
-    const rooms = rows.map((row) => row.room_id);
+    const response = await esClient.search({
+      index: "meters_idx",
+      body: {
+        aggs: {
+          unique_rooms: {
+            terms: {
+              field: "room_id",
+              size: 1000,
+            },
+          },
+        },
+        size: 0,
+      },
+    });
+
+    const rooms = response.body.aggregations.unique_rooms.buckets
+      .map((bucket) => bucket.key)
+      .sort((a, b) => a - b);
+
     res.json({ rooms });
   } catch (error) {
     console.error("❌ Error fetching rooms:", error.message);
     res.status(500).json({ error: "Failed to fetch rooms" });
   }
 });
+
+// Helper function to build date range query based on period
+const buildDateRangeQuery = (period, date) => {
+  const d = dayjs(date);
+
+  switch (period) {
+    case "hour":
+      return {
+        gte: d.startOf("day").toISOString(),
+        lte: d.endOf("day").toISOString(),
+      };
+    case "day":
+      return {
+        gte: d.startOf("month").toISOString(),
+        lte: d.endOf("month").toISOString(),
+      };
+    case "month":
+      return {
+        gte: d.startOf("year").toISOString(),
+        lte: d.endOf("year").toISOString(),
+      };
+    case "year":
+      return {
+        gte: "2020-01-01T00:00:00.000Z", // Adjust based on your data range
+        lte: dayjs().endOf("year").toISOString(),
+      };
+    default:
+      return {
+        gte: d.startOf("day").toISOString(),
+        lte: d.endOf("day").toISOString(),
+      };
+  }
+};
+
+// Helper function to get aggregation interval
+const getAggregationInterval = (period) => {
+  switch (period) {
+    case "hour":
+      return "1h";
+    case "day":
+      return "1d";
+    case "month":
+      return "1M";
+    case "year":
+      return "1y";
+    default:
+      return "1h";
+  }
+};
+
+// Helper function to format period label
+const formatPeriodLabel = (period, timestamp) => {
+  const dt = dayjs(timestamp);
+
+  switch (period) {
+    case "hour":
+      return dt.format("HH:00");
+    case "day":
+      return dt.format("MMM DD");
+    case "month":
+      return dt.format("MMMM");
+    case "year":
+      return dt.format("YYYY");
+    default:
+      return dt.format("HH:00");
+  }
+};
 
 // Main API endpoint for energy data calculation
 app.get("/api/data", async (req, res) => {
@@ -83,144 +196,142 @@ app.get("/api/data", async (req, res) => {
     } = req.query;
 
     if (!dayjs(date).isValid()) {
-      return res.status(400).json({ error: "Invalid date format. Use YYYY-MM-DD." });
+      return res
+        .status(400)
+        .json({ error: "Invalid date format. Use YYYY-MM-DD." });
     }
 
-    let dateFilter, groupBy, selectPeriodFields;
-    const params = [];
+    // Get meters mapping
+    const macToRoomMap = await getMetersMapping();
 
-    switch (period) {
-      case "hour":
-        dateFilter = "DATE(p.log_datetime) = ?";
-        groupBy = "HOUR(p.log_datetime)";
-        selectPeriodFields = `
-          HOUR(p.log_datetime) AS period_value,
-          DATE_FORMAT(MIN(p.log_datetime), '%Y-%m-%d %H:00:00') AS timestamp,
-          DATE_FORMAT(MIN(p.log_datetime), '%H:00') AS period_label`;
-        params.push(date);
-        break;
-      case "day":
-        const d = dayjs(date);
-        dateFilter = `YEAR(p.log_datetime) = ? AND MONTH(p.log_datetime) = ?`;
-        groupBy = "DAY(p.log_datetime)";
-        selectPeriodFields = `
-          DAY(p.log_datetime) AS period_value,
-          DATE_FORMAT(MIN(p.log_datetime), '%Y-%m-%d 00:00:00') AS timestamp,
-          DATE_FORMAT(MIN(p.log_datetime), '%b %d') AS period_label`;
-        params.push(d.year(), d.month() + 1);
-        break;
-      case "month":
-        dateFilter = `YEAR(p.log_datetime) = ?`;
-        groupBy = "MONTH(p.log_datetime)";
-        selectPeriodFields = `
-          MONTH(p.log_datetime) AS period_value,
-          DATE_FORMAT(MIN(p.log_datetime), '%Y-%m-01 00:00:00') AS timestamp,
-          DATE_FORMAT(MIN(p.log_datetime), '%M') AS period_label`;
-        params.push(dayjs(date).year());
-        break;
-      case "year":
-        dateFilter = `1=1`;
-        groupBy = "YEAR(p.log_datetime)";
-        selectPeriodFields = `
-          YEAR(p.log_datetime) AS period_value,
-          DATE_FORMAT(MIN(p.log_datetime), '%Y-01-01 00:00:00') AS timestamp,
-          YEAR(p.log_datetime) AS period_label`;
-        break;
-      default:
-        return res.status(400).json({ error: "Invalid period specified." });
+    // Build date range query
+    const dateRange = buildDateRangeQuery(period, date);
+    const interval = getAggregationInterval(period);
+
+    // Elasticsearch query to get energy data with aggregations
+    const esQuery = {
+      index: "pzem_idx",
+      body: {
+        query: {
+          range: {
+            log_datetime: dateRange,
+          },
+        },
+        aggs: {
+          periods: {
+            date_histogram: {
+              field: "log_datetime",
+              calendar_interval: interval,
+              time_zone: "UTC",
+            },
+            aggs: {
+              by_mac: {
+                terms: {
+                  field: "mac_address.keyword",
+                  size: 1000,
+                },
+                aggs: {
+                  first_energy: {
+                    top_hits: {
+                      sort: [{ log_datetime: { order: "asc" } }],
+                      _source: ["energy", "log_datetime"],
+                      size: 1,
+                    },
+                  },
+                  last_energy: {
+                    top_hits: {
+                      sort: [{ log_datetime: { order: "desc" } }],
+                      _source: ["energy", "log_datetime"],
+                      size: 1,
+                    },
+                  },
+                },
+              },
+            },
+          },
+        },
+        size: 0,
+      },
+    };
+
+    console.log(
+      "🔍 Executing Elasticsearch query:",
+      JSON.stringify(esQuery, null, 2)
+    );
+    const { aggregations } = await esClient.search(esQuery); // ✅ Destructure properly
+
+    if (!aggregations || !aggregations.periods.buckets.length) {
+      return res.json({
+        data: [],
+        message: "No data available for the selected criteria.",
+      });
     }
 
-    // This logic correctly constructs the SQL CASE statement depending on whether a 'room' is provided.
-    let consumptionCaseLogic;
-    const queryParams = [...params];
+    // Process the aggregation results
+    const transformedData = aggregations.periods.buckets.map((periodBucket) => {
+      const timestamp = periodBucket.key_as_string;
+      const periodLabel = formatPeriodLabel(period, timestamp);
 
-    if (room) {
-        consumptionCaseLogic = `WHEN m.room_id = ? THEN ped.energy_delta ELSE 0`;
-        queryParams.push(room);
-    } else {
-        consumptionCaseLogic = `ELSE ped.energy_delta`;
-    }
+      let consumptionEnergy = 0;
+      let supplyEnergy = 0;
 
-    // SQL: For each period/meter, get first and last reading, then compute delta
-    const sqlQuery = `
-      WITH PeriodReadings AS (
-        SELECT
-          ${selectPeriodFields},
-          p.mac_address,
-          MIN(p.log_datetime) AS first_log_datetime,
-          MAX(p.log_datetime) AS last_log_datetime
-        FROM PZEM p
-        WHERE ${dateFilter}
-        GROUP BY ${groupBy}, p.mac_address
-      ),
-      PeriodsWithEnergy AS (
-        SELECT
-          pr.period_value,
-          pr.timestamp,
-          pr.period_label,
-          pr.mac_address,
-          first_p.energy AS first_energy,
-          last_p.energy AS last_energy
-        FROM PeriodReadings pr
-        JOIN PZEM first_p
-          ON first_p.mac_address = pr.mac_address AND first_p.log_datetime = pr.first_log_datetime
-        JOIN PZEM last_p
-          ON last_p.mac_address = pr.mac_address AND last_p.log_datetime = pr.last_log_datetime
-      ),
-      PeriodEnergyDeltas AS (
-        SELECT
-          period_value,
-          timestamp,
-          period_label,
-          mac_address,
-          (last_energy - first_energy) AS energy_delta
-        FROM PeriodsWithEnergy
-      )
-      SELECT
-        ped.period_value,
-        ped.timestamp,
-        ped.period_label,
-        COALESCE(SUM(
-          CASE
-            WHEN UPPER(REPLACE(ped.mac_address, ':', '')) = '${SUPPLY_MAC_NORMALIZED}' THEN 0
-            ${consumptionCaseLogic}
-          END
-        ), 0) AS consumption_energy_wh,
-        COALESCE(SUM(
-          CASE
-            WHEN UPPER(REPLACE(ped.mac_address, ':', '')) = '${SUPPLY_MAC_NORMALIZED}' THEN ped.energy_delta
-            ELSE 0
-          END
-        ), 0) AS supply_energy_wh
-      FROM PeriodEnergyDeltas ped
-      LEFT JOIN meters m ON UPPER(REPLACE(ped.mac_address, ':', '')) = UPPER(REPLACE(m.meter_mac, ':', ''))
-      GROUP BY ped.period_value, ped.timestamp, ped.period_label
-      ORDER BY ped.period_value ASC;
-    `;
-    
-    console.log("🔍 Executing SQL:", sqlQuery);
-    console.log("📋 Parameters:", queryParams);
+      periodBucket.by_mac.buckets.forEach((macBucket) => {
+        const macAddress = macBucket.key;
+        const normalizedMac = normalizeMacAddress(macAddress);
 
-    const [results] = await dbPool.execute(sqlQuery, queryParams);
-    
-    if (results.length === 0) {
-      return res.json({ data: [], message: "No data available for the selected criteria." });
-    }
-    
-    // Transform data for the frontend, assuming DB stores in kWh (no conversion needed for consumption or supply)
-    const transformedData = results.map((row) => ({
-      timestamp: row.period_label,
-      fullTimestamp: new Date(row.timestamp),
-      period: row.period_value,
-      consumption: parseFloat(row.consumption_energy_wh || 0),
-      supply: parseFloat(row.supply_energy_wh || 0),
-    }));
+        // Get first and last energy readings
+        const firstHit = macBucket.first_energy.hits.hits[0];
+        const lastHit = macBucket.last_energy.hits.hits[0];
+
+        if (firstHit && lastHit) {
+          const firstEnergy = firstHit._source.energy;
+          const lastEnergy = lastHit._source.energy;
+          const energyDelta = lastEnergy - firstEnergy;
+
+          // Check if this is the supply meter
+          if (normalizedMac === SUPPLY_MAC_NORMALIZED) {
+            supplyEnergy += energyDelta;
+          } else {
+            // Handle room filtering
+            if (room) {
+              const meterRoom = macToRoomMap[normalizedMac];
+              if (meterRoom && meterRoom.toString() === room.toString()) {
+                consumptionEnergy += energyDelta;
+              }
+            } else {
+              // Include all consumption meters if no room specified
+              consumptionEnergy += energyDelta;
+            }
+          }
+        }
+      });
+
+      return {
+        timestamp: periodLabel,
+        fullTimestamp: new Date(timestamp),
+        period: dayjs(timestamp).get(
+          period === "hour"
+            ? "hour"
+            : period === "day"
+            ? "date"
+            : period === "month"
+            ? "month"
+            : "year"
+        ),
+        consumption: Math.max(0, parseFloat(consumptionEnergy.toFixed(3))),
+        supply: Math.max(0, parseFloat(supplyEnergy.toFixed(3))),
+      };
+    });
+
+    // Sort by period value
+    transformedData.sort((a, b) => a.period - b.period);
 
     res.json({ data: transformedData });
-
   } catch (error) {
-    console.error("❌ Database query error:", error.message);
-    res.status(500).json({ error: "Database query failed", details: error.message });
+    console.error("❌ Elasticsearch query error:", error.message);
+    res
+      .status(500)
+      .json({ error: "Elasticsearch query failed", details: error.message });
   }
 });
 
