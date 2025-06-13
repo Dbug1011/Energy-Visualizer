@@ -61,6 +61,7 @@ const normalizeMacAddress = (mac) => {
 
 // Helper function to get meters data and create MAC to room mapping
 const getMetersMapping = async () => {
+  const macToRoomMap = {}; // <-- Add this line
   try {
     const response = await esClient.search({
       index: "meters_idx",
@@ -68,12 +69,10 @@ const getMetersMapping = async () => {
         query: {
           match_all: {},
         },
-        size: 10000, // Adjust based on your data size
+        size: 10000,
       },
     });
-
-    const macToRoomMap = {};
-    response.body.hits.hits.forEach((hit) => {
+    response.hits.hits.forEach((hit) => {
       const source = hit._source;
       if (source.meter_mac && source.room_id) {
         const normalizedMac = normalizeMacAddress(source.meter_mac);
@@ -106,7 +105,7 @@ app.get("/api/rooms", async (req, res) => {
       },
     });
 
-    const rooms = response.body.aggregations.unique_rooms.buckets
+    const rooms = response.aggregations.unique_rooms.buckets
       .map((bucket) => bucket.key)
       .sort((a, b) => a - b);
 
@@ -258,7 +257,8 @@ app.get("/api/data", async (req, res) => {
       "🔍 Executing Elasticsearch query:",
       JSON.stringify(esQuery, null, 2)
     );
-    const { aggregations } = await esClient.search(esQuery); // ✅ Destructure properly
+    const response = await esClient.search(esQuery);
+    const aggregations = response.aggregations;
 
     if (!aggregations || !aggregations.periods.buckets.length) {
       return res.json({
