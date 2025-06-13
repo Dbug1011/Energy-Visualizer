@@ -8,7 +8,7 @@ const app = express();
 const PORT = process.env.PORT || 3001;
 
 // The normalized MAC address for the main grid supply meter.
-const SUPPLY_MAC_NORMALIZED = "08F9E07364DB";
+const SUPPLY_MAC_NORMALIZED = "08:f9:e0:73:64:db"; // lowercase, with colons
 
 // CORS configuration
 app.use(
@@ -56,7 +56,7 @@ app.get("/api/health", (req, res) => {
 
 // Helper function to normalize MAC address
 const normalizeMacAddress = (mac) => {
-  return mac.replace(/:/g, "").toUpperCase();
+  return mac.toLowerCase(); // keep colons, just lowercase
 };
 
 // Helper function to get meters data and create MAC to room mapping
@@ -207,13 +207,32 @@ app.get("/api/data", async (req, res) => {
     const dateRange = buildDateRangeQuery(period, date);
     const interval = getAggregationInterval(period);
 
+    // Before building esQuery
+    let macFilter = [];
+    if (room) {
+      // Find all MACs for the selected room
+      const macsForRoom = Object.entries(macToRoomMap)
+        .filter(([mac, roomId]) => roomId.toString() === room.toString())
+        .map(([mac]) => mac); // These are already normalized to lowercase
+      if (macsForRoom.length) {
+        macFilter = [{ terms: { "mac_address.keyword": macsForRoom } }];
+      } else {
+        // If no MACs found for the room, return no data early
+        return res.json({
+          data: [],
+          message: "No meters found for the selected room.",
+        });
+      }
+    }
+    // If no room is selected, do NOT add a MAC filter (include all meters)
+
     // Elasticsearch query to get energy data with aggregations
     const esQuery = {
       index: "pzem_idx",
       body: {
         query: {
-          range: {
-            log_datetime: dateRange,
+          bool: {
+            filter: [{ range: { log_datetime: dateRange } }, ...macFilter],
           },
         },
         aggs: {
@@ -272,6 +291,10 @@ app.get("/api/data", async (req, res) => {
       const timestamp = periodBucket.key_as_string;
       const periodLabel = formatPeriodLabel(period, timestamp);
 
+      // Calculate period boundaries
+      const periodStart = dayjs(timestamp).startOf(period).toDate().getTime();
+      const periodEnd = dayjs(timestamp).endOf(period).toDate().getTime();
+
       let consumptionEnergy = 0;
       let supplyEnergy = 0;
 
@@ -279,27 +302,28 @@ app.get("/api/data", async (req, res) => {
         const macAddress = macBucket.key;
         const normalizedMac = normalizeMacAddress(macAddress);
 
-        // Get first and last energy readings
-        const firstHit = macBucket.first_energy.hits.hits[0];
-        const lastHit = macBucket.last_energy.hits.hits[0];
+        const firstReading = macBucket.first_energy.hits.hits[0];
+        const lastReading = macBucket.last_energy.hits.hits[0];
 
-        if (firstHit && lastHit) {
-          const firstEnergy = firstHit._source.energy;
-          const lastEnergy = lastHit._source.energy;
+        if (firstReading && lastReading) {
+          const firstEnergy = firstReading._source.energy;
+          const lastEnergy = lastReading._source.energy;
           const energyDelta = lastEnergy - firstEnergy;
 
-          // Check if this is the supply meter
+          // Add this log:
+          console.log(
+            `[${periodLabel}] MAC: ${macAddress} | First: ${firstEnergy} (${firstReading._source.log_datetime}) | Last: ${lastEnergy} (${lastReading._source.log_datetime}) | Delta: ${energyDelta}`
+          );
+
           if (normalizedMac === SUPPLY_MAC_NORMALIZED) {
             supplyEnergy += energyDelta;
           } else {
-            // Handle room filtering
             if (room) {
               const meterRoom = macToRoomMap[normalizedMac];
               if (meterRoom && meterRoom.toString() === room.toString()) {
                 consumptionEnergy += energyDelta;
               }
             } else {
-              // Include all consumption meters if no room specified
               consumptionEnergy += energyDelta;
             }
           }
