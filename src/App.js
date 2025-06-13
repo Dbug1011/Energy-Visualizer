@@ -1,86 +1,6 @@
-import React, { useEffect, useState } from "react";
+import React, { useEffect, useState, useCallback } from "react";
 import EnergyChart from "./components/EnergyChart";
-
-// Helper function to format timestamps based on period
-const formatTimestamp = (period, periodType) => {
-  if (periodType === "hour") {
-    return `${period.toString().padStart(2, "0")}:00`;
-  } else if (periodType === "day") {
-    return `Day ${period}`;
-  } else if (periodType === "month") {
-    const months = [
-      "Jan",
-      "Feb",
-      "Mar",
-      "Apr",
-      "May",
-      "Jun",
-      "Jul",
-      "Aug",
-      "Sep",
-      "Oct",
-      "Nov",
-      "Dec",
-    ];
-    return months[period - 1] || `Month ${period}`;
-  } else if (periodType === "year") {
-    return period.toString();
-  }
-  return period;
-};
-
-// Mock data generator for fallback
-// const generateMockData = (period, room, date) => {
-//   const data = [];
-//   let periods = [];
-
-//   if (period === "hour") {
-//     for (let i = 0; i < 24; i++) {
-//       periods.push(`${i.toString().padStart(2, "0")}:00`);
-//     }
-//   } else if (period === "day") {
-//     for (let i = 1; i <= 30; i++) {
-//       periods.push(`Day ${i}`);
-//     }
-//   } else if (period === "month") {
-//     const months = [
-//       "Jan",
-//       "Feb",
-//       "Mar",
-//       "Apr",
-//       "May",
-//       "Jun",
-//       "Jul",
-//       "Aug",
-//       "Sep",
-//       "Oct",
-//       "Nov",
-//       "Dec",
-//     ];
-//     periods = months;
-//   } else if (period === "year") {
-//     for (let i = 2020; i <= 2025; i++) {
-//       periods.push(i.toString());
-//     }
-//   }
-
-//   periods.forEach((p, index) => {
-//     const baseConsumption = room ? (room === "201" ? 150 : 120) : 100;
-//     const timeVariation =
-//       period === "hour" ? (index >= 8 && index <= 18 ? 1.5 : 0.8) : 1;
-
-//     data.push({
-//       timestamp: p,
-//       period: index,
-//       consumption: Math.round(
-//         baseConsumption * timeVariation + Math.random() * 50
-//       ),
-//       supply: Math.round(200 + Math.random() * 100),
-//     });
-//   });
-
-//   return data;
-// };
+import dayjs from "dayjs";
 
 const DatePicker = ({ selected, onChange, dateFormat, className }) => {
   const formatDate = (date) => {
@@ -90,7 +10,7 @@ const DatePicker = ({ selected, onChange, dateFormat, className }) => {
   return (
     <input
       type="date"
-      value={formatDate(selected)}
+      value={selected ? formatDate(selected) : ""} // Handle null/undefined selected
       onChange={(e) => onChange(new Date(e.target.value))}
       className={className}
       style={{
@@ -106,18 +26,22 @@ const DatePicker = ({ selected, onChange, dateFormat, className }) => {
 const App = () => {
   const [data, setData] = useState([]);
   const [period, setPeriod] = useState("hour");
-  const [room, setRoom] = useState("");
+  const [room, setRoom] = useState(""); // Default to empty string for "All Rooms"
   const [selectedDate, setSelectedDate] = useState(new Date());
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
-  const [serverStatus, setServerStatus] = useState("unknown");
+  const [serverStatus, setServerStatus] = useState("unknown"); // This state is used in JSX
 
-  // Test server connectivity
-  const testServerConnection = async () => {
+  // State to hold available rooms fetched from the backend
+  const [availableRooms, setAvailableRooms] = useState([]);
+  const [showSupply, setShowSupply] = useState(true);
+
+  // useCallback to memoize testServerConnection, preventing unnecessary re-creations
+  const testServerConnection = useCallback(async () => {
     const servers = [
       "http://localhost:3001",
       "http://127.0.0.1:3001",
-      "http://142.91.104.5:3001",
+      "http://142.91.104.5:3001", // Your remote server IP
     ];
 
     for (const server of servers) {
@@ -129,66 +53,88 @@ const App = () => {
             Accept: "application/json",
             "Content-Type": "application/json",
           },
-          // Add timeout
-          signal: AbortSignal.timeout(5000),
+          signal: AbortSignal.timeout(5000), // 5-second timeout for health check
         });
 
         if (response.ok) {
           const healthData = await response.json();
           console.log(`✅ Server ${server} is accessible:`, healthData);
+          setServerStatus(server); // Set serverStatus upon successful connection
           return server;
         }
       } catch (err) {
         console.warn(`❌ Server ${server} not accessible:`, err.message);
       }
     }
+    setServerStatus("Error: No server accessible."); // Update status if no server connects
     return null;
-  };
+  }, []); // Empty dependency array as this function doesn't depend on props/state
 
-  // Fetch data from API
-  const fetchData = async () => {
+  // useCallback to memoize fetchRooms
+  const fetchRooms = useCallback(async (workingServer) => {
+    if (!workingServer) return;
+    try {
+      const response = await fetch(`${workingServer}/api/rooms`, {
+        method: "GET",
+        signal: AbortSignal.timeout(5000), // 5-second timeout
+      });
+      if (!response.ok) {
+        throw new Error(`Failed to fetch rooms: ${response.statusText}`);
+      }
+      const data = await response.json();
+      setAvailableRooms(data.rooms.sort((a, b) => a - b)); // Sort numerically
+      console.log("Fetched rooms:", data.rooms);
+    } catch (err) {
+      console.error("Error fetching rooms:", err);
+      // If there's an error fetching rooms, you might want to display it
+      // or set a default empty array for rooms.
+    }
+  }, []); // Empty dependency array as this function doesn't depend on props/state
+
+  // Main data fetching function, wrapped in useCallback
+  const fetchData = useCallback(async () => {
     setLoading(true);
-    setError(null);
+    setError(null); // Clear previous errors
 
     try {
-      // First test server connectivity
+      // Always test connection first
       const workingServer = await testServerConnection();
-
       if (!workingServer) {
-        throw new Error(
-          "No server is accessible. Please check if the server is running."
-        );
+        // testServerConnection already set an error message
+        setLoading(false);
+        return;
       }
 
-      setServerStatus(workingServer);
+      // Fetch rooms only if they haven't been loaded yet
+      if (availableRooms.length === 0) {
+        await fetchRooms(workingServer);
+      }
 
-      // Build query parameters
+      // Build query parameters for the API call
       const params = new URLSearchParams({
         period,
         date: selectedDate.toISOString().split("T")[0],
       });
-
       if (room) {
         params.append("room", room);
       }
 
       console.log(`📡 Fetching data from: ${workingServer}/api/data?${params}`);
 
-      // Fetch data with timeout
       const response = await fetch(`${workingServer}/api/data?${params}`, {
         method: "GET",
         headers: {
           Accept: "application/json",
           "Content-Type": "application/json",
         },
-        signal: AbortSignal.timeout(10000), // 10 second timeout
+        signal: AbortSignal.timeout(30000), // 30 seconds
       });
 
       if (!response.ok) {
-        const errorData = await response.json().catch(() => ({}));
+        const errorData = await response.json().catch(() => ({})); // Try to parse error response
         throw new Error(
           `Server error (${response.status}): ${
-            errorData.error || response.statusText
+            errorData.error || response.statusText || "Unknown error"
           }`
         );
       }
@@ -196,10 +142,9 @@ const App = () => {
       const responseData = await response.json();
       console.log("📊 Raw API response:", responseData);
 
-      // Handle both old and new response formats
       let apiData = responseData;
       if (responseData.data) {
-        apiData = responseData.data; // New format with meta wrapper
+        apiData = responseData.data; // Handle new format with data wrapper
       }
 
       if (!Array.isArray(apiData)) {
@@ -208,38 +153,121 @@ const App = () => {
 
       if (apiData.length === 0) {
         console.warn("⚠️ No data returned from API");
-        setError("No data available for the selected period and filters.");
-        setData([]);
+        setError("No data available for the selected criteria.");
+        setData([]); // Clear previous data
         return;
       }
 
-      // Transform and format the data
-      const mappedData = apiData.map((item) => ({
-        timestamp: formatTimestamp(item.period, period),
-        period: item.period,
-        consumption: parseFloat(item.consumption) || 0,
-        supply: room ? null : parseFloat(item.supply) || 0, // Only include supply when no room filter
-        record_count: item.record_count || 0,
-      }));
+      // Transform data: 'consumption' and 'supply' are already in kWh from backend
+      const mappedData = apiData.map((item) => {
+        const dateObject = new Date(item.fullTimestamp);
+
+        let formattedTimestamp;
+
+        if (period === "hour") {
+          formattedTimestamp = `${item.period.toString().padStart(2, "0")}:00`;
+        } else if (period === "day") {
+          formattedTimestamp = dayjs(dateObject).format("MMM DD"); // e.g. Jan 05
+        } else if (period === "month") {
+          formattedTimestamp = dayjs(dateObject).format("MMMM"); // e.g. January
+        } else if (period === "year") {
+          formattedTimestamp = dayjs(dateObject).format("YYYY"); // e.g. 2024
+        } else {
+          formattedTimestamp = dayjs(dateObject).format(); // fallback
+        }
+
+        return {
+          timestamp: formattedTimestamp,
+          fullTimestamp: dateObject,
+          period: item.period,
+          consumption: parseFloat(item.consumption) || 0,
+          supply: parseFloat(item.supply) || 0,
+        };
+      });
 
       console.log("✅ Processed data:", mappedData);
-      setData(mappedData);
+
+      // Helper to generate all period labels for the selected period
+      function generateAllPeriods(period, selectedDate) {
+        const periods = [];
+        const d = dayjs(selectedDate);
+
+        if (period === "day") {
+          const daysInMonth = d.daysInMonth();
+          for (let i = 1; i <= daysInMonth; i++) {
+            periods.push({
+              timestamp: dayjs(d).date(i).format("MMM DD"),
+              period: i,
+            });
+          }
+        } else if (period === "month") {
+          for (let i = 0; i < 12; i++) {
+            periods.push({
+              timestamp: dayjs().month(i).format("MMMM"),
+              period: i,
+            });
+          }
+        } else if (period === "year") {
+          const startYear = 2023; // <-- Start from 2023
+          const endYear = d.year();
+          for (let y = startYear; y <= endYear; y++) {
+            periods.push({
+              timestamp: y.toString(),
+              period: y,
+            });
+          }
+        }
+        return periods;
+      }
+
+      // After mapping your data:
+      let filledData = mappedData;
+
+      if (["day", "month", "year"].includes(period)) {
+        const allPeriods = generateAllPeriods(period, selectedDate);
+        filledData = allPeriods.map((p) => {
+          const found = mappedData.find((d) => d.timestamp === p.timestamp);
+          return found
+            ? found
+            : {
+                ...p,
+                consumption: 0,
+                supply: 0,
+              };
+        });
+      }
+
+      setData(filledData);
     } catch (err) {
       console.error("❌ Failed to fetch data:", err);
-      setError(err.message);
-
-      // Use mock data as fallback
-      console.log("🔄 Using mock data as fallback...");
-      // const mockData = generateMockData(period, room, selectedDate);
-      // setData(mockData);
+      setError(err.message); // Set error state
     } finally {
-      setLoading(false);
+      setLoading(false); // Always set loading to false
     }
-  };
+  }, [
+    period,
+    room,
+    selectedDate,
+    availableRooms.length,
+    fetchRooms,
+    testServerConnection,
+  ]); // Dependencies for fetchData
 
+  // useEffect to trigger fetchData when relevant filters change
   useEffect(() => {
     fetchData();
-  }, [period, room, selectedDate]);
+  }, [fetchData]); // Dependency array: fetchData (because it's memoized with useCallback)
+
+  // useEffect to fetch rooms only once on component mount or if testServerConnection changes
+  useEffect(() => {
+    const initApp = async () => {
+      const server = await testServerConnection(); // Get the working server
+      if (server) {
+        await fetchRooms(server); // Fetch rooms using the working server
+      }
+    };
+    initApp();
+  }, [testServerConnection, fetchRooms]); // Depend on memoized functions
 
   return (
     <div
@@ -262,6 +290,24 @@ const App = () => {
         Electricity Utilization Dashboard
       </h2>
 
+      {/* Display server status - This uses 'serverStatus' */}
+      <div
+        style={{
+          textAlign: "center",
+          marginBottom: "15px",
+          fontSize: "14px",
+          color: serverStatus.includes("Error") ? "#dc3545" : "#28a745",
+        }}
+      >
+        Server Status:{" "}
+        {serverStatus === "unknown"
+          ? "Connecting..."
+          : serverStatus.includes("Error")
+          ? "Failed to connect to any server."
+          : `Connected to ${serverStatus}`}
+      </div>
+
+      {/* Control Panel */}
       <div
         style={{
           marginBottom: "30px",
@@ -335,18 +381,24 @@ const App = () => {
             >
               Room:
             </label>
-            <input
+            <select
               value={room}
               onChange={(e) => setRoom(e.target.value)}
-              placeholder="e.g., 201"
               style={{
                 padding: "8px 12px",
                 border: "1px solid #ced4da",
                 borderRadius: "4px",
                 fontSize: "14px",
-                width: "120px",
+                width: "150px", // Adjust width as needed
               }}
-            />
+            >
+              <option value="">All Rooms</option> {/* Option for all rooms */}
+              {availableRooms.map((r) => (
+                <option key={r} value={r}>
+                  Room {r}
+                </option>
+              ))}
+            </select>
           </div>
 
           <div>
@@ -389,6 +441,7 @@ const App = () => {
         </div>
       </div>
 
+      {/* Conditional Rendering for Loading, Error, or Chart */}
       {loading ? (
         <div
           style={{
@@ -404,6 +457,19 @@ const App = () => {
           >
             Testing server connections and fetching data
           </div>
+        </div>
+      ) : error ? (
+        <div
+          style={{
+            textAlign: "center",
+            padding: "40px",
+            color: "#dc3545",
+            backgroundColor: "#f8d7da",
+            border: "1px solid #f5c6cb",
+            borderRadius: "8px",
+          }}
+        >
+          Error: {error}
         </div>
       ) : (
         <div
@@ -427,8 +493,8 @@ const App = () => {
                 }}
               >
                 {room
-                  ? `Room ${room} Energy Consumption`
-                  : "All Rooms Consumption vs Supply Grid"}
+                  ? `Room ${room} Energy Consumption (kWh)`
+                  : "All Rooms Consumption vs Grid Supply (kWh)"}
               </div>
               <div
                 style={{
@@ -441,7 +507,26 @@ const App = () => {
                 Showing {data.length} data points for {period}ly view
                 {room && ` (Room ${room} only)`}
               </div>
-              <EnergyChart data={data} />
+              <div style={{ textAlign: "center", marginBottom: "10px" }}>
+                <label style={{ fontWeight: 600, marginRight: 8 }}>
+                  <input
+                    type="checkbox"
+                    checked={showSupply}
+                    onChange={() => setShowSupply((prev) => !prev)}
+                    style={{ marginRight: 6 }}
+                    disabled={room !== ""} // Only allow toggle when viewing all rooms
+                  />
+                  Show Grid Supply (Supply MAC)
+                </label>
+                {room !== "" && (
+                  <span
+                    style={{ color: "#888", fontSize: "12px", marginLeft: 8 }}
+                  >
+                    (Grid supply only shown for "All Rooms" view)
+                  </span>
+                )}
+              </div>
+              <EnergyChart data={data} showSupply={room === "" && showSupply} />
             </>
           ) : (
             <div
