@@ -1,4 +1,6 @@
-import React, { useEffect, useState, useCallback } from "react";
+"use client";
+
+import { useEffect, useState, useCallback } from "react";
 import EnergyChart from "./components/EnergyChart";
 import dayjs from "dayjs";
 
@@ -10,14 +12,25 @@ const DatePicker = ({ selected, onChange, dateFormat, className }) => {
   return (
     <input
       type="date"
-      value={selected ? formatDate(selected) : ""} // Handle null/undefined selected
+      value={selected ? formatDate(selected) : ""}
       onChange={(e) => onChange(new Date(e.target.value))}
       className={className}
       style={{
         padding: "8px 12px",
-        border: "1px solid #ccc",
-        borderRadius: "4px",
+        border: "1px solid rgba(16, 185, 129, 0.3)",
+        borderRadius: "6px",
         fontSize: "14px",
+        background: "rgba(255, 255, 255, 0.8)",
+        backdropFilter: "blur(10px)",
+        outline: "none",
+      }}
+      onFocus={(e) => {
+        e.target.style.borderColor = "#10b981";
+        e.target.style.boxShadow = "0 0 0 2px rgba(16, 185, 129, 0.2)";
+      }}
+      onBlur={(e) => {
+        e.target.style.borderColor = "rgba(16, 185, 129, 0.3)";
+        e.target.style.boxShadow = "none";
       }}
     />
   );
@@ -26,22 +39,19 @@ const DatePicker = ({ selected, onChange, dateFormat, className }) => {
 const App = () => {
   const [data, setData] = useState([]);
   const [period, setPeriod] = useState("hour");
-  const [room, setRoom] = useState(""); // Default to empty string for "All Rooms"
+  const [room, setRoom] = useState("");
   const [selectedDate, setSelectedDate] = useState(new Date());
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
-  const [serverStatus, setServerStatus] = useState("unknown"); // This state is used in JSX
-
-  // State to hold available rooms fetched from the backend
+  const [serverStatus, setServerStatus] = useState("unknown");
   const [availableRooms, setAvailableRooms] = useState([]);
   const [showSupply, setShowSupply] = useState(true);
 
-  // useCallback to memoize testServerConnection, preventing unnecessary re-creations
   const testServerConnection = useCallback(async () => {
     const servers = [
       "http://localhost:3001",
       "http://127.0.0.1:3001",
-      "http://142.91.104.5:3001", // Your remote server IP
+      "http://142.91.104.5:3001",
     ];
 
     for (const server of servers) {
@@ -53,64 +63,56 @@ const App = () => {
             Accept: "application/json",
             "Content-Type": "application/json",
           },
-          signal: AbortSignal.timeout(5000), // 5-second timeout for health check
+          signal: AbortSignal.timeout(5000),
         });
 
         if (response.ok) {
           const healthData = await response.json();
           console.log(`✅ Server ${server} is accessible:`, healthData);
-          setServerStatus(server); // Set serverStatus upon successful connection
+          setServerStatus(server);
           return server;
         }
       } catch (err) {
         console.warn(`❌ Server ${server} not accessible:`, err.message);
       }
     }
-    setServerStatus("Error: No server accessible."); // Update status if no server connects
+    setServerStatus("Error: No server accessible.");
     return null;
-  }, []); // Empty dependency array as this function doesn't depend on props/state
+  }, []);
 
-  // useCallback to memoize fetchRooms
   const fetchRooms = useCallback(async (workingServer) => {
     if (!workingServer) return;
     try {
       const response = await fetch(`${workingServer}/api/rooms`, {
         method: "GET",
-        signal: AbortSignal.timeout(5000), // 5-second timeout
+        signal: AbortSignal.timeout(5000),
       });
       if (!response.ok) {
         throw new Error(`Failed to fetch rooms: ${response.statusText}`);
       }
       const data = await response.json();
-      setAvailableRooms(data.rooms.sort((a, b) => a - b)); // Sort numerically
+      setAvailableRooms(data.rooms.sort((a, b) => a - b));
       console.log("Fetched rooms:", data.rooms);
     } catch (err) {
       console.error("Error fetching rooms:", err);
-      // If there's an error fetching rooms, you might want to display it
-      // or set a default empty array for rooms.
     }
-  }, []); // Empty dependency array as this function doesn't depend on props/state
+  }, []);
 
-  // Main data fetching function, wrapped in useCallback
   const fetchData = useCallback(async () => {
     setLoading(true);
-    setError(null); // Clear previous errors
+    setError(null);
 
     try {
-      // Always test connection first
       const workingServer = await testServerConnection();
       if (!workingServer) {
-        // testServerConnection already set an error message
         setLoading(false);
         return;
       }
 
-      // Fetch rooms only if they haven't been loaded yet
       if (availableRooms.length === 0) {
         await fetchRooms(workingServer);
       }
 
-      // Build query parameters for the API call
       const params = new URLSearchParams({
         period,
         date: selectedDate.toISOString().split("T")[0],
@@ -127,11 +129,11 @@ const App = () => {
           Accept: "application/json",
           "Content-Type": "application/json",
         },
-        signal: AbortSignal.timeout(30000), // 30 seconds
+        signal: AbortSignal.timeout(30000),
       });
 
       if (!response.ok) {
-        const errorData = await response.json().catch(() => ({})); // Try to parse error response
+        const errorData = await response.json().catch(() => ({}));
         throw new Error(
           `Server error (${response.status}): ${
             errorData.error || response.statusText || "Unknown error"
@@ -144,7 +146,7 @@ const App = () => {
 
       let apiData = responseData;
       if (responseData.data) {
-        apiData = responseData.data; // Handle new format with data wrapper
+        apiData = responseData.data;
       }
 
       if (!Array.isArray(apiData)) {
@@ -154,11 +156,10 @@ const App = () => {
       if (apiData.length === 0) {
         console.warn("⚠️ No data returned from API");
         setError("No data available for the selected criteria.");
-        setData([]); // Clear previous data
+        setData([]);
         return;
       }
 
-      // Transform data: 'consumption' and 'supply' are already in kWh from backend
       const mappedData = apiData.map((item) => {
         const dateObject = new Date(item.fullTimestamp);
 
@@ -167,27 +168,26 @@ const App = () => {
         if (period === "hour") {
           formattedTimestamp = `${item.period.toString().padStart(2, "0")}:00`;
         } else if (period === "day") {
-          formattedTimestamp = dayjs(dateObject).format("MMM DD"); // e.g. Jan 05
+          formattedTimestamp = dayjs(dateObject).format("MMM DD");
         } else if (period === "month") {
-          formattedTimestamp = dayjs(dateObject).format("MMMM"); // e.g. January
+          formattedTimestamp = dayjs(dateObject).format("MMMM");
         } else if (period === "year") {
-          formattedTimestamp = dayjs(dateObject).format("YYYY"); // e.g. 2024
+          formattedTimestamp = dayjs(dateObject).format("YYYY");
         } else {
-          formattedTimestamp = dayjs(dateObject).format(); // fallback
+          formattedTimestamp = dayjs(dateObject).format();
         }
 
         return {
           timestamp: formattedTimestamp,
           fullTimestamp: dateObject,
           period: item.period,
-          consumption: parseFloat(item.consumption) || 0,
-          supply: parseFloat(item.supply) || 0,
+          consumption: Number.parseFloat(item.consumption) || 0,
+          supply: Number.parseFloat(item.supply) || 0,
         };
       });
 
       console.log("✅ Processed data:", mappedData);
 
-      // Helper to generate all period labels for the selected period
       function generateAllPeriods(period, selectedDate) {
         const periods = [];
         const d = dayjs(selectedDate);
@@ -208,8 +208,9 @@ const App = () => {
             });
           }
         } else if (period === "year") {
-          const startYear = 2023; // <-- Start from 2023
-          const endYear = d.year();
+          // FIX: Add this block to handle the year period
+          const startYear = 2023; // The earliest year of your data
+          const endYear = d.year(); // The year from the date picker
           for (let y = startYear; y <= endYear; y++) {
             periods.push({
               timestamp: y.toString(),
@@ -220,7 +221,6 @@ const App = () => {
         return periods;
       }
 
-      // After mapping your data:
       let filledData = mappedData;
 
       if (["day", "month", "year"].includes(period)) {
@@ -240,9 +240,9 @@ const App = () => {
       setData(filledData);
     } catch (err) {
       console.error("❌ Failed to fetch data:", err);
-      setError(err.message); // Set error state
+      setError(err.message);
     } finally {
-      setLoading(false); // Always set loading to false
+      setLoading(false);
     }
   }, [
     period,
@@ -251,293 +251,479 @@ const App = () => {
     availableRooms.length,
     fetchRooms,
     testServerConnection,
-  ]); // Dependencies for fetchData
+  ]);
 
-  // useEffect to trigger fetchData when relevant filters change
   useEffect(() => {
     fetchData();
-  }, [fetchData]); // Dependency array: fetchData (because it's memoized with useCallback)
+  }, [fetchData]);
 
-  // useEffect to fetch rooms only once on component mount or if testServerConnection changes
   useEffect(() => {
     const initApp = async () => {
-      const server = await testServerConnection(); // Get the working server
+      const server = await testServerConnection();
       if (server) {
-        await fetchRooms(server); // Fetch rooms using the working server
+        await fetchRooms(server);
       }
     };
     initApp();
-  }, [testServerConnection, fetchRooms]); // Depend on memoized functions
+  }, [testServerConnection, fetchRooms]);
 
   return (
-    <div
-      style={{
-        padding: "20px",
-        maxWidth: "1200px",
-        margin: "0 auto",
-        fontFamily: "Arial, sans-serif",
-      }}
-    >
-      <h2
-        style={{
-          fontSize: "30px",
-          textAlign: "center",
-          fontWeight: "bold",
-          color: "#333",
-          marginBottom: "30px",
-        }}
-      >
-        Electricity Utilization Dashboard
-      </h2>
-
-      {/* Display server status - This uses 'serverStatus' */}
+    <>
+      {/* Full Window Background */}
       <div
         style={{
-          textAlign: "center",
-          marginBottom: "15px",
-          fontSize: "14px",
-          color: serverStatus.includes("Error") ? "#dc3545" : "#28a745",
+          position: "fixed",
+          top: 0,
+          left: 0,
+          width: "100vw",
+          height: "100vh",
+          background: `
+            linear-gradient(135deg, #e0f2fe 0%, #f0f9ff 25%, #ecfdf5 50%, #fef3c7 75%, #f0f9ff 100%),
+            radial-gradient(circle at 25% 25%, rgba(255, 255, 255, 0.3) 0%, transparent 50%),
+            radial-gradient(circle at 75% 75%, rgba(16, 185, 129, 0.1) 0%, transparent 50%)
+          `,
+          backgroundSize: "400% 400%, 800px 800px, 600px 600px",
+          animation: "gradientShift 20s ease infinite",
+          zIndex: -2,
         }}
-      >
-        Server Status:{" "}
-        {serverStatus === "unknown"
-          ? "Connecting..."
-          : serverStatus.includes("Error")
-          ? "Failed to connect to any server."
-          : `Connected to ${serverStatus}`}
-      </div>
+      />
 
-      {/* Control Panel */}
+      {/* Animated Pattern Overlay */}
       <div
         style={{
-          marginBottom: "30px",
-          padding: "20px",
-          backgroundColor: "#f8f9fa",
-          borderRadius: "8px",
-          border: "1px solid #e9ecef",
+          position: "fixed",
+          top: 0,
+          left: 0,
+          width: "100vw",
+          height: "100vh",
+          backgroundImage: `
+            radial-gradient(circle at 20% 80%, rgba(16, 185, 129, 0.08) 0%, transparent 50%),
+            radial-gradient(circle at 80% 20%, rgba(255, 107, 53, 0.08) 0%, transparent 50%),
+            radial-gradient(circle at 40% 40%, rgba(59, 130, 246, 0.06) 0%, transparent 50%),
+            linear-gradient(45deg, transparent 30%, rgba(255, 255, 255, 0.03) 50%, transparent 70%)
+          `,
+          backgroundSize: "600px 600px, 800px 800px, 400px 400px, 200px 200px",
+          animation: "float 25s ease-in-out infinite",
+          zIndex: -1,
+        }}
+      />
+
+      {/* Main Content */}
+      <div
+        style={{
+          position: "relative",
+          padding: "16px",
+          maxWidth: "1200px",
+          margin: "0 auto",
+          fontFamily: "Arial, sans-serif",
+          minHeight: "100vh",
+          zIndex: 1,
         }}
       >
-        <div style={{ marginBottom: "20px" }}>
-          <label
+        {/* Header */}
+        <div
+          style={{
+            textAlign: "center",
+            marginBottom: "20px",
+          }}
+        >
+          <h1
             style={{
-              display: "block",
-              marginBottom: "8px",
+              fontSize: "24px",
               fontWeight: "600",
-              color: "#495057",
+              color: "#111827",
+              margin: "0 0 8px 0",
             }}
           >
-            Period:
-          </label>
-          <div style={{ display: "flex", gap: "8px", flexWrap: "wrap" }}>
-            {["hour", "day", "month", "year"].map((p) => (
-              <button
-                key={p}
-                onClick={() => setPeriod(p)}
-                style={{
-                  padding: "10px 16px",
-                  borderRadius: "6px",
-                  border: "2px solid #A5B582",
-                  backgroundColor: period === p ? "#A5B582" : "white",
-                  color: period === p ? "white" : "#A5B582",
-                  cursor: "pointer",
-                  fontWeight: "600",
-                  fontSize: "14px",
-                  transition: "all 0.2s ease",
-                  textTransform: "capitalize",
-                }}
-                onMouseOver={(e) => {
-                  if (period !== p) {
-                    e.target.style.backgroundColor = "#f8f9fa";
-                  }
-                }}
-                onMouseOut={(e) => {
-                  if (period !== p) {
-                    e.target.style.backgroundColor = "white";
-                  }
-                }}
-              >
-                {p.charAt(0).toUpperCase() + p.slice(1)}
-              </button>
-            ))}
+            Electricity Dashboard
+          </h1>
+
+          {/* Server Status */}
+          <div
+            style={{
+              fontSize: "12px",
+              color: serverStatus.includes("Error") ? "#dc2626" : "#10b981",
+              fontWeight: "500",
+            }}
+          >
+            {serverStatus === "unknown"
+              ? "Connecting..."
+              : serverStatus.includes("Error")
+              ? "Server connection failed"
+              : `Connected to ${serverStatus.split("//")[1]}`}
           </div>
         </div>
 
+        {/* Unified Control Panel */}
         <div
           style={{
-            display: "flex",
-            gap: "20px",
-            alignItems: "center",
-            flexWrap: "wrap",
+            marginBottom: "20px",
+            padding: "20px",
+            background:
+              "linear-gradient(135deg, rgba(255, 255, 255, 0.4) 0%, rgba(255, 255, 255, 0.2) 100%)",
+            backdropFilter: "blur(15px)",
+            borderRadius: "12px",
+            border: "1px solid rgba(255, 255, 255, 0.5)",
+            boxShadow: "0 4px 20px rgba(0, 0, 0, 0.08)",
           }}
         >
-          <div>
-            <label
-              style={{
-                display: "block",
-                marginBottom: "8px",
-                fontWeight: "600",
-                color: "#495057",
-              }}
-            >
-              Room:
-            </label>
-            <select
-              value={room}
-              onChange={(e) => setRoom(e.target.value)}
-              style={{
-                padding: "8px 12px",
-                border: "1px solid #ced4da",
-                borderRadius: "4px",
-                fontSize: "14px",
-                width: "150px", // Adjust width as needed
-              }}
-            >
-              <option value="">All Rooms</option> {/* Option for all rooms */}
-              {availableRooms.map((r) => (
-                <option key={r} value={r}>
-                  Room {r}
-                </option>
-              ))}
-            </select>
-          </div>
+          <div
+            style={{
+              display: "grid",
+              gridTemplateColumns: "2fr 1fr 1fr 1fr",
+              gap: "20px",
+              alignItems: "end",
+            }}
+          >
+            {/* Period Selection */}
+            <div>
+              <label
+                style={{
+                  display: "block",
+                  marginBottom: "8px",
+                  fontSize: "14px",
+                  fontWeight: "500",
+                  color: "#374151",
+                }}
+              >
+                Period:
+              </label>
+              <div style={{ display: "flex", gap: "6px" }}>
+                {["hour", "day", "month", "year"].map((p) => (
+                  <button
+                    key={p}
+                    onClick={() => setPeriod(p)}
+                    style={{
+                      padding: "8px 14px",
+                      borderRadius: "6px",
+                      border: "none",
+                      background:
+                        period === p
+                          ? "linear-gradient(135deg, #10b981 0%, #059669 100%)"
+                          : "rgba(255, 255, 255, 0.7)",
+                      color: period === p ? "#ffffff" : "#374151",
+                      cursor: "pointer",
+                      fontWeight: "500",
+                      fontSize: "13px",
+                      textTransform: "capitalize",
+                      transition: "all 0.2s ease",
+                      boxShadow:
+                        period === p
+                          ? "0 2px 8px rgba(16, 185, 129, 0.3)"
+                          : "0 1px 3px rgba(0, 0, 0, 0.1)",
+                      backdropFilter: "blur(10px)",
+                      flex: 1,
+                    }}
+                  >
+                    {p.charAt(0).toUpperCase() + p.slice(1)}
+                  </button>
+                ))}
+              </div>
+            </div>
 
-          <div>
-            <label
-              style={{
-                display: "block",
-                marginBottom: "8px",
-                fontWeight: "600",
-                color: "#495057",
-              }}
-            >
-              Date:
-            </label>
-            <DatePicker
-              selected={selectedDate}
-              onChange={(date) => setSelectedDate(date)}
-              dateFormat="yyyy-MM-dd"
-              className="date-picker"
-            />
-          </div>
+            {/* Room Selection */}
+            <div>
+              <label
+                style={{
+                  display: "block",
+                  marginBottom: "8px",
+                  fontSize: "14px",
+                  fontWeight: "500",
+                  color: "#374151",
+                }}
+              >
+                Room:
+              </label>
+              <select
+                value={room}
+                onChange={(e) => setRoom(e.target.value)}
+                style={{
+                  padding: "8px 12px",
+                  border: "1px solid rgba(255, 255, 255, 0.6)",
+                  borderRadius: "6px",
+                  fontSize: "14px",
+                  background: "rgba(255, 255, 255, 0.7)",
+                  backdropFilter: "blur(10px)",
+                  outline: "none",
+                  width: "100%",
+                  color: "#374151",
+                }}
+                onFocus={(e) => {
+                  e.target.style.borderColor = "#10b981";
+                  e.target.style.boxShadow =
+                    "0 0 0 2px rgba(16, 185, 129, 0.2)";
+                }}
+                onBlur={(e) => {
+                  e.target.style.borderColor = "rgba(255, 255, 255, 0.6)";
+                  e.target.style.boxShadow = "none";
+                }}
+              >
+                <option value="">All Rooms</option>
+                {availableRooms.map((r) => (
+                  <option key={r} value={r}>
+                    Room {r}
+                  </option>
+                ))}
+              </select>
+            </div>
 
-          <div style={{ marginTop: "24px" }}>
-            <button
-              onClick={fetchData}
-              disabled={loading}
-              style={{
-                padding: "8px 16px",
-                backgroundColor: "#73D673",
-                color: "white",
-                border: "none",
-                borderRadius: "4px",
-                cursor: loading ? "not-allowed" : "pointer",
-                fontSize: "14px",
-                opacity: loading ? 0.6 : 1,
-              }}
-            >
-              {loading ? "Refreshing..." : "Refresh Data"}
-            </button>
+            {/* Date Selection */}
+            <div>
+              <label
+                style={{
+                  display: "block",
+                  marginBottom: "8px",
+                  fontSize: "14px",
+                  fontWeight: "500",
+                  color: "#374151",
+                }}
+              >
+                Date:
+              </label>
+              <DatePicker
+                selected={selectedDate}
+                onChange={(date) => setSelectedDate(date)}
+                dateFormat="yyyy-MM-dd"
+                className="date-picker"
+              />
+            </div>
+
+            {/* Refresh Button */}
+            <div>
+              <button
+                onClick={fetchData}
+                disabled={loading}
+                style={{
+                  padding: "8px 16px",
+                  background: loading
+                    ? "rgba(156, 163, 175, 0.8)"
+                    : "linear-gradient(135deg, #ff6b35 0%, #f7931e 100%)",
+                  color: "#ffffff",
+                  border: "none",
+                  borderRadius: "6px",
+                  cursor: loading ? "not-allowed" : "pointer",
+                  fontSize: "14px",
+                  fontWeight: "500",
+                  width: "100%",
+                  height: "36px",
+                  transition: "all 0.2s ease",
+                  boxShadow: loading
+                    ? "none"
+                    : "0 2px 8px rgba(255, 107, 53, 0.3)",
+                  backdropFilter: "blur(10px)",
+                }}
+              >
+                {loading ? "Refreshing..." : "Refresh"}
+              </button>
+            </div>
           </div>
         </div>
+
+        {/* Main Content */}
+        {loading ? (
+          <div
+            style={{
+              background:
+                "linear-gradient(135deg, rgba(255, 255, 255, 0.4) 0%, rgba(255, 255, 255, 0.2) 100%)",
+              backdropFilter: "blur(15px)",
+              borderRadius: "12px",
+              border: "1px solid rgba(255, 255, 255, 0.5)",
+              boxShadow: "0 4px 20px rgba(0, 0, 0, 0.08)",
+              padding: "40px",
+              textAlign: "center",
+            }}
+          >
+            <div
+              style={{
+                width: "40px",
+                height: "40px",
+                border: "3px solid rgba(16, 185, 129, 0.3)",
+                borderTop: "3px solid #10b981",
+                borderRadius: "50%",
+                animation: "spin 1s linear infinite",
+                margin: "0 auto 16px",
+              }}
+            />
+            <div
+              style={{
+                fontSize: "16px",
+                color: "#374151",
+                marginBottom: "8px",
+              }}
+            >
+              Loading data...
+            </div>
+            <div style={{ fontSize: "12px", color: "#6b7280" }}>
+              Testing server connections and fetching data
+            </div>
+          </div>
+        ) : error ? (
+          <div
+            style={{
+              background:
+                "linear-gradient(135deg, rgba(254, 242, 242, 0.8) 0%, rgba(220, 38, 38, 0.1) 100%)",
+              backdropFilter: "blur(15px)",
+              border: "1px solid rgba(220, 38, 38, 0.3)",
+              borderRadius: "12px",
+              padding: "20px",
+              textAlign: "center",
+              boxShadow: "0 4px 20px rgba(220, 38, 38, 0.1)",
+            }}
+          >
+            <div
+              style={{
+                fontSize: "14px",
+                fontWeight: "500",
+                color: "#dc2626",
+                marginBottom: "4px",
+              }}
+            >
+              Error Loading Data
+            </div>
+            <div style={{ fontSize: "12px", color: "#991b1b" }}>{error}</div>
+          </div>
+        ) : (
+          <div
+            style={{
+              background:
+                "linear-gradient(135deg, rgba(255, 255, 255, 0.4) 0%, rgba(255, 255, 255, 0.2) 100%)",
+              backdropFilter: "blur(15px)",
+              borderRadius: "12px",
+              border: "1px solid rgba(255, 255, 255, 0.5)",
+              boxShadow: "0 4px 20px rgba(0, 0, 0, 0.08)",
+            }}
+          >
+            {data.length > 0 ? (
+              <>
+                {/* Chart Header */}
+                <div
+                  style={{
+                    padding: "16px 20px 12px",
+                  }}
+                >
+                  <div
+                    style={{
+                      fontSize: "16px",
+                      fontWeight: "600",
+                      color: "#111827",
+                      marginBottom: "8px",
+                      textAlign: "center",
+                    }}
+                  >
+                    {room
+                      ? `Room ${room} Energy Consumption (kWh)`
+                      : "All Rooms Consumption vs Grid Supply (kWh)"}
+                  </div>
+
+                  {/* Supply Toggle */}
+                  <div style={{ textAlign: "center" }}>
+                    <label
+                      style={{
+                        display: "inline-flex",
+                        alignItems: "center",
+                        gap: "6px",
+                        fontSize: "13px",
+                        fontWeight: "500",
+                        color: room === "" ? "#374151" : "#6b7280",
+                        cursor: room === "" ? "pointer" : "not-allowed",
+                        padding: "4px 8px",
+                      }}
+                    >
+                      <input
+                        type="checkbox"
+                        checked={showSupply}
+                        onChange={() => setShowSupply((prev) => !prev)}
+                        disabled={room !== ""}
+                        style={{
+                          cursor: room === "" ? "pointer" : "not-allowed",
+                          accentColor: "#10b981",
+                        }}
+                      />
+                      Show Grid Supply
+                      {room !== "" && (
+                        <span
+                          style={{
+                            fontSize: "11px",
+                            color: "#6b7280",
+                            fontStyle: "italic",
+                          }}
+                        >
+                          (All Rooms only)
+                        </span>
+                      )}
+                    </label>
+                  </div>
+                </div>
+
+                {/* Chart */}
+                <div style={{ padding: "16px" }}>
+                  <EnergyChart
+                    data={data}
+                    showSupply={room === "" && showSupply}
+                  />
+                </div>
+              </>
+            ) : (
+              <div
+                style={{
+                  padding: "40px",
+                  textAlign: "center",
+                }}
+              >
+                <div
+                  style={{
+                    fontSize: "14px",
+                    color: "#374151",
+                    marginBottom: "4px",
+                  }}
+                >
+                  No Data Available
+                </div>
+                <div style={{ fontSize: "12px", color: "#6b7280" }}>
+                  No data found for the selected criteria
+                </div>
+              </div>
+            )}
+          </div>
+        )}
       </div>
 
-      {/* Conditional Rendering for Loading, Error, or Chart */}
-      {loading ? (
-        <div
-          style={{
-            textAlign: "center",
-            padding: "40px",
-            fontSize: "18px",
-            color: "#6c757d",
-          }}
-        >
-          <div>Loading data...</div>
-          <div
-            style={{ fontSize: "14px", marginTop: "10px", color: "#868e96" }}
-          >
-            Testing server connections and fetching data
-          </div>
-        </div>
-      ) : error ? (
-        <div
-          style={{
-            textAlign: "center",
-            padding: "40px",
-            color: "#dc3545",
-            backgroundColor: "#f8d7da",
-            border: "1px solid #f5c6cb",
-            borderRadius: "8px",
-          }}
-        >
-          Error: {error}
-        </div>
-      ) : (
-        <div
-          style={{
-            backgroundColor: "white",
-            padding: "20px",
-            borderRadius: "8px",
-            border: "1px solid #e9ecef",
-            boxShadow: "0 2px 4px rgba(0,0,0,0.1)",
-          }}
-        >
-          {data.length > 0 ? (
-            <>
-              <div
-                style={{
-                  marginBottom: "15px",
-                  fontSize: "16px",
-                  fontWeight: "600",
-                  color: "#333",
-                  textAlign: "center",
-                }}
-              >
-                {room
-                  ? `Room ${room} Energy Consumption (kWh)`
-                  : "All Rooms Consumption vs Grid Supply (kWh)"}
-              </div>
-              <div
-                style={{
-                  marginBottom: "15px",
-                  fontSize: "14px",
-                  color: "#6c757d",
-                  textAlign: "center",
-                }}
-              >
-                Showing {data.length} data points for {period}ly view
-                {room && ` (Room ${room} only)`}
-              </div>
-              <div style={{ textAlign: "center", marginBottom: "10px" }}>
-                <label style={{ fontWeight: 600, marginRight: 8 }}>
-                  <input
-                    type="checkbox"
-                    checked={showSupply}
-                    onChange={() => setShowSupply((prev) => !prev)}
-                    style={{ marginRight: 6 }}
-                    disabled={room !== ""} // Only allow toggle when viewing all rooms
-                  />
-                  Show Grid Supply (Supply MAC)
-                </label>
-                {room !== "" && (
-                  <span
-                    style={{ color: "#888", fontSize: "12px", marginLeft: 8 }}
-                  >
-                    (Grid supply only shown for "All Rooms" view)
-                  </span>
-                )}
-              </div>
-              <EnergyChart data={data} showSupply={room === "" && showSupply} />
-            </>
-          ) : (
-            <div
-              style={{ textAlign: "center", padding: "40px", color: "#6c757d" }}
-            >
-              No data available for the selected criteria
-            </div>
-          )}
-        </div>
-      )}
-    </div>
+      <style jsx>{`
+        @keyframes gradientShift {
+          0% {
+            background-position: 0% 50%;
+          }
+          50% {
+            background-position: 100% 50%;
+          }
+          100% {
+            background-position: 0% 50%;
+          }
+        }
+
+        @keyframes float {
+          0%,
+          100% {
+            transform: translateY(0px) rotate(0deg);
+          }
+          33% {
+            transform: translateY(-8px) rotate(0.5deg);
+          }
+          66% {
+            transform: translateY(4px) rotate(-0.5deg);
+          }
+        }
+
+        @keyframes spin {
+          0% {
+            transform: rotate(0deg);
+          }
+          100% {
+            transform: rotate(360deg);
+          }
+        }
+      `}</style>
+    </>
   );
 };
 
