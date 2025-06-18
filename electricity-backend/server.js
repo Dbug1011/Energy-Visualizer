@@ -43,6 +43,7 @@ const esClient = new Client({
     username: process.env.ES_USERNAME,
     password: process.env.ES_PASSWORD,
   },
+  compatibilityHeader: false,
   maxRetries: 3,
   requestTimeout: 30000,
   sniffOnStart: true,
@@ -177,8 +178,8 @@ const buildEsQuery = (dateRange, macFilter) => ({
   size: 0,
 });
 
-// Generic function to calculate energy consumption
-const calculateEnergyFromBuckets = (buckets) => {
+// Update: Only sum consumption for MACs in meters table (rooms 1-16), exclude others for "all rooms"
+const calculateEnergyFromBuckets = (buckets, macToRoomMap, room) => {
   let consumptionEnergy = 0;
   let supplyEnergy = 0;
 
@@ -194,8 +195,19 @@ const calculateEnergyFromBuckets = (buckets) => {
 
       if (normalizedMac === SUPPLY_MAC_NORMALIZED) {
         supplyEnergy += energyDelta;
+      } else if (room) {
+        // If a specific room is requested, keep original logic
+        if (
+          macToRoomMap.hasOwnProperty(normalizedMac) &&
+          macToRoomMap[normalizedMac].toString() === room.toString()
+        ) {
+          consumptionEnergy += energyDelta;
+        }
       } else {
-        consumptionEnergy += energyDelta;
+        // For all rooms: only sum MACs that are in meters table (rooms 1-16)
+        if (macToRoomMap.hasOwnProperty(normalizedMac)) {
+          consumptionEnergy += energyDelta;
+        }
       }
     }
   });
@@ -277,8 +289,15 @@ const getTimePeriods = (period, dateRange, inputDate) => {
   return periods;
 };
 
-// Optimized function to get energy readings for any period
-const getEnergyReadings = async (period, dateRange, macFilter, inputDate) => {
+// Update: Pass macToRoomMap and room to calculateEnergyFromBuckets in getEnergyReadings
+const getEnergyReadings = async (
+  period,
+  dateRange,
+  macFilter,
+  inputDate,
+  macToRoomMap,
+  room
+) => {
   try {
     const timePeriods = getTimePeriods(period, dateRange, inputDate);
     const results = [];
@@ -301,7 +320,11 @@ const getEnergyReadings = async (period, dateRange, macFilter, inputDate) => {
         });
 
         const energy = response.aggregations?.by_mac?.buckets?.length
-          ? calculateEnergyFromBuckets(response.aggregations.by_mac.buckets)
+          ? calculateEnergyFromBuckets(
+              response.aggregations.by_mac.buckets,
+              macToRoomMap,
+              room
+            )
           : { consumption: 0, supply: 0 };
 
         return {
@@ -358,7 +381,7 @@ app.get("/api/rooms", async (req, res) => {
   }
 });
 
-// Main API endpoint - optimized version
+// Main API endpoint - pass macToRoomMap and room to getEnergyReadings
 app.get("/api/data", async (req, res) => {
   console.log("📥 Received request for energy data:", req.query);
 
@@ -386,7 +409,7 @@ app.get("/api/data", async (req, res) => {
     const macToRoomMap = await getMetersMapping();
     const dateRange = buildDateRangeQuery(period, date);
 
-    // Build MAC filter for room
+    // Build MAC filter for room (do not change this logic)
     let macFilter = [];
     if (room) {
       const macsForRoom = Object.entries(macToRoomMap)
@@ -404,7 +427,14 @@ app.get("/api/data", async (req, res) => {
     }
 
     // Get energy readings
-    const result = await getEnergyReadings(period, dateRange, macFilter, date);
+    const result = await getEnergyReadings(
+      period,
+      dateRange,
+      macFilter,
+      date,
+      macToRoomMap,
+      room
+    );
 
     res.json({
       data: result,
